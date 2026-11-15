@@ -50,6 +50,32 @@ std::vector<std::pair<std::string, std::string>> nv_default_env(int major, int m
             {"STRATA_FUSE_DECODE", "1"},         // -1.3
             {"STRATA_GR_UP75", "1"},             // -1.2
         };
+    } else if (mj == 7 && mn == 5) {
+        // Turing (RTX 20).  The sm_75 series is opt-in only because nobody on the team had an sm_75 card to confirm
+        // it; measured on an RTX 2080 Ti (sm_75, driver 610.57.04, nvcc 13.0 -arch=sm_75) the kernels it turns on are
+        // what that card should run.  Four of them are bit-identical to the kernels they replace, and their output
+        // hash or ids were the same in every shape tried (7 to 10 shapes each, alternating rounds):
+        //   PA_V1_PREFETCH   prompt attention  1.72x   (the shared K/V buffer takes a block's shared memory from
+        //                                             37.9 to 29.2 KB: two blocks an SM instead of one on a 64 KB
+        //                                             Turing SM.  The kernel is latency-bound, not tensor-core-bound -
+        //                                             removing half of every MMA saves 11%, and replacing the
+        //                                             int8->half2 conversion with a passthrough saves nothing.)
+        //   ATTN_V3          decode attention  1.40-2.12x (2.0-2.1x at 2-8 queries, i.e. the concurrency a server runs)
+        //   TOPK_SPLIT       decode top-k      1.06-11.54x, growing with --max-context (1.06x at a 16K-block window,
+        //                                      11.5x at 262146), because the split kernel stops the top-k from
+        //                                      serialising on one CTA per query.
+        //   SCORES_THREAD    prompt scorer     2.95-8.23x  (the warp kernel's per-block shuffle reduction is what
+        //                                      costs there; the P100 gain was +1..3%, under the 3% bar, which is why
+        //                                      the switch was held back)
+        if (off("STRATA_SM75_PERF")) return t;
+        t = {
+            {"STRATA_SM75_PERF", "1"},
+            // the v2 prompt-attention kernel (register staging instead of cp.async) instead of v1: 1.24-1.33x.  It
+            // sums in another order, 2.1e-07 relative RMS from v1, and qsa_prompt_attn_parity puts its error against
+            // the FP64 reference slightly LOWER than v1's (6.15e-06 against 6.99e-06 at ctx 32768) - so this table
+            // is not described as "exact" in the line below.
+            {"STRATA_PA_V2T", "1"},
+        };
     } else if (mj == 12 && mn == 1) {
         // GB10 (NVIDIA DGX Spark, 48 SMs, unified memory): only what was measured on that part goes in.  New in 0.2.7.1, so
         // STRATA_DEFAULTS=026 (the master switch of everything since 0.2.6) leaves the table out, like STRATA_SM121_PERF=0.
@@ -98,11 +124,14 @@ std::vector<std::string> apply_nv_defaults(int major, int minor) {
     if (!set.empty()) {
         const bool sm86 = mj == 8;
         const bool sm121 = mj == 12 && mn == 1;
-        // sm_86 / sm_60: bit-exact switches.  sm_121: the fused prompt path and the FP4-activation NVFP4 prompt round differently from the
+        const bool sm75 = mj == 7 && mn == 5;
+        // sm_86 / sm_60: bit-exact switches.  sm_75: the series it turns on is bit-exact too, but the table also sets
+        // STRATA_PA_V2T, which sums in another order, so the line does not say "exact".  sm_121: the fused prompt path and the FP4-activation NVFP4 prompt round differently from the
         // paths they replace (24 of 24 greedy answers were identical on the Spark; no KL run), so the line does not say "exact".
         std::fprintf(stderr, "strata: %s: %zu %sspeed switches on by default (%s=0 turns them off%s; a switch you set is kept): ",
-                     sm86 ? "sm_86 (Ampere)" : sm121 ? "sm_121 (GB10)" : "sm_60 (Pascal)", set.size(), sm121 ? "" : "exact ",
-                     sm86 ? "STRATA_SM86_PERF" : sm121 ? "STRATA_SM121_PERF" : "STRATA_SM60_PERF",
+                     sm86 ? "sm_86 (Ampere)" : sm121 ? "sm_121 (GB10)" : sm75 ? "sm_75 (Turing)" : "sm_60 (Pascal)", set.size(),
+                     (sm121 || sm75) ? "" : "exact ",
+                     sm86 ? "STRATA_SM86_PERF" : sm121 ? "STRATA_SM121_PERF" : sm75 ? "STRATA_SM75_PERF" : "STRATA_SM60_PERF",
                      sm121 ? ", as does STRATA_DEFAULTS=026" : "");
         for (size_t i = 0; i < set.size(); ++i) std::fprintf(stderr, "%s%s", i ? " " : "", set[i].c_str() + 7);
         std::fprintf(stderr, "\n");

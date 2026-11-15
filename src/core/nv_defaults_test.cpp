@@ -36,6 +36,8 @@ int main() {
     unset("STRATA_SM121_PERF");
     unset("STRATA_SM86_PERF");
     unset("STRATA_SM60_PERF");
+    unset("STRATA_SM75_PERF");
+    unset("STRATA_PA_V2T");
     unset("STRATA_EMULATE_CC");
     // GB10 (12.1): the five measured switches, and nothing else
     {
@@ -59,7 +61,24 @@ int main() {
     CHECK(nv_default_env(12, 0, false).empty());
     CHECK(nv_default_env(10, 0, false).empty());
     CHECK(nv_default_env(8, 9, false).empty());
-    CHECK(nv_default_env(7, 5, false).empty());
+    // sm_75 (RTX 20): the Turing series plus the v2 prompt-attention kernel
+    {
+        const auto t = nv_default_env(7, 5, false);
+        CHECK(t.size() == 2);
+        CHECK(find(t, "STRATA_SM75_PERF") && *find(t, "STRATA_SM75_PERF") == "1");
+        CHECK(find(t, "STRATA_PA_V2T") && *find(t, "STRATA_PA_V2T") == "1");
+        // STRATA_SM75_PERF=0 empties it; any other value keeps it; the 0.2.6 master switch does not touch it
+        put("STRATA_SM75_PERF", "0");
+        CHECK(nv_default_env(7, 5, false).empty());
+        put("STRATA_SM75_PERF", "1");
+        CHECK(nv_default_env(7, 5, false).size() == 2);
+        unset("STRATA_SM75_PERF");
+        CHECK(nv_default_env(7, 5, false) == nv_default_env(7, 5, true));
+        // and it did not leak onto the neighbouring architectures
+        CHECK(nv_default_env(7, 0, false).empty());
+        CHECK(nv_default_env(8, 0, false).empty());
+        CHECK(!find(nv_default_env(8, 6, false), "STRATA_PA_V2T"));
+    }
     {
         const auto a = nv_default_env(8, 6, false), b = nv_default_env(8, 6, true);
         CHECK(!a.empty() && a == b);               // STRATA_DEFAULTS=026 does not touch the 2026-10 sm_86 table
